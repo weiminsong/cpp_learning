@@ -1,3 +1,2 @@
 # cpp_learning
-For learning c++
-With simple codes
+For learning c++ with simple codes
