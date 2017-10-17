@@ -1,0 +1,2 @@
+/home/ppd/fuy49536/Desktop/CPP/cmake/Tutorial/Step2/build/MathFunctions/CMakeFiles/MathFunctions.dir
+/home/ppd/fuy49536/Desktop/CPP/cmake/Tutorial/Step2/build/CMakeFiles/Tutorial.dir
