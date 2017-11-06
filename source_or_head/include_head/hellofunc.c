@@ -1,5 +1,5 @@
 #include <stdio.h>
-#include "hellomake.h"
+#include "hellofunc.h"
 void myPrintHelloMake(void) {
 
   printf("Hello makefiles!\n");
