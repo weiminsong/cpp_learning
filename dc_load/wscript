@@ -1,0 +1,1338 @@
+# -*- python -*-
+
+# waf configuration script
+#  Run waf: waf configure
+
+import os, sys
+import subprocess
+
+if sys.platform == "win32":
+        # The problem this is solving is the error reporting dialog that appears
+        # when one of the tests crashes.
+        # NB waf has a process pool which apparently gets used early enough that we can't 
+        # set this up in the build function!
+        # This is based on a Stackoverflow answer, which also suggests passing
+        # creationflags=0x80000000 (CREATE_NO_WINDOW) to subprocess (but seems to be unnecessary).
+        import ctypes
+        SEM_NOGPFAULTERRORBOX = 0x0002 # From MSDN
+        ctypes.windll.kernel32.SetErrorMode(SEM_NOGPFAULTERRORBOX);
+
+def options(opt):
+        opt.load('compiler_c')
+        opt.load('compiler_cxx')
+        opt.load('python')
+
+        # Something like:
+        #   --with[out]-PACKAGE[=path]
+        #   --enable-FEATURE
+        #   --disable-FEATURE
+
+        opg = opt.add_option_group("SCTDAQ options")
+
+        opg.add_option('--disable-hsio', action='store_false', default=True,
+                       help='Skip HSIO stuff', dest='use_hsio')
+        opg.add_option('--enable-ni6562', action='store_true', default=False,
+                       help='Use NI6562 for DAQ', dest='use_ni6562')
+
+        # Default different different platforms
+        opg.add_option('--enable-visa', action='store_true', default=None,
+                       help='Use NI VISA for serial access', dest='enable_visa')
+        opg.add_option('--disable-visa', action='store_false',
+                       help='Disable VISA', dest='enable_visa')
+
+        opg.add_option('--disable-pcap', action='store_false',
+                       help='Disable PCAP', dest='enable_pcap')
+
+        opg.add_option('--disable-stsvn', action='store_false',
+                       help="Don't try to make stsvn.h (must be done manually)",
+                       dest='enable_stsvn')
+
+        opg.add_option('--enable-tests', action='store_true',
+                       help='Build tests etc.', dest='enable_tests')
+        opg.add_option('--enable-compile-macros', action='store_true',
+                       help='Try to compile macros', dest='enable_compile_macros')
+
+        opg.add_option('--with-rootsys', action='store', default="", help='Specify ROOTSYS (alternatively uses environment)')
+        opg.add_option('--with-boost', action='store', default="", help='Specify include directory for BOOST')
+        opg.add_option('--with-eudaq', action='store', default="", help='Specify EUDAQ (not necessary, but useful for ROOTProducer testing)')
+
+# Find external libraries etc
+def configure(conf):
+        conf.load('compiler_c')
+        conf.load('compiler_cxx')
+
+        conf.start_msg("Found compiler")
+        conf.end_msg(conf.env.CC_NAME + " " + "_".join(conf.env.CC_VERSION))
+
+        if conf.env.CC_NAME == "gcc":
+                cc_version = conf.env.CC_VERSION
+                if (int(cc_version[0]) < 4
+                    or (int(cc_version[0]) == 4 and int(cc_version[1]) < 7)):
+                        raise conf.errors.ConfigurationError("GCC found, but version is too old (need at least 4.7)")
+
+                gccArchOutput = conf.check_cfg(path='gcc',
+                        args=['-march=native', '-Q', '--help=target'],
+                        package='', name='GCC_ARCH',
+                        msg='Checking Architecture', okmsg='Done')
+
+                for l in gccArchOutput.split("\n"):
+                        if "march" in l:
+                                conf.env.GCC_ARCH = l.split()[1]
+
+                if conf.env.GCC_ARCH:
+                        try:
+                                gasHelpOutput = conf.check_cfg(path='as',
+                                        args=['--help'],
+                                        package='', name='ASM_HELP',
+                                        msg='Checking Assembler support', okmsg='Done')
+
+                                if conf.env.GCC_ARCH not in gasHelpOutput:
+                                        conf.env.GCC_ARCH = None
+                                        conf.msg("Binutils doesn't support architecture", "defaulting")
+                        except ValueError:
+                                # If run on devtoolset gcc/as, we get an exception
+                                conf.end_msg("Oops")
+                                conf.env.GCC_ARCH = None
+                                conf.msg("Mysterious use of shlex", "defaulting")
+
+                conf.msg("Use architecture", conf.env.GCC_ARCH)
+
+        elif conf.env.CC_NAME == "msvc":
+                if conf.env.MSVC_VERSION < 12.0:
+                        raise ctx.errors.ConfigurationError("MSVC found, but version is too old (suggest at least VS2015)")
+
+        conf.start_msg("Found OS")
+        conf.end_msg(conf.env.DEST_OS)
+        conf.start_msg("Found CPU")
+        conf.end_msg(conf.env.DEST_CPU)
+
+        if conf.options.use_ni6562:
+                conf.options.use_hsio = False
+
+        if conf.env.DEST_OS == 'win32' and conf.env.DEST_CPU in ['x86_64', 'amd64']:
+                conf.fatal('64bit not supported on windows yet, try adding --msvc_targets="x86"')
+
+        if conf.env.DEST_OS != 'win32':
+                if conf.env.CC_NAME == "gcc" and int(conf.env.CC_VERSION[0]) > 4:
+                        # This is because ROOT is compiled like this
+                        conf.env.append_value('CXXFLAGS', '-std=c++14')
+                else:
+                        conf.env.append_value('CXXFLAGS', '-std=c++11')
+                conf.env.append_value('CXXFLAGS', '-Wall')
+
+        try:
+                conf.check(compiler="cxx", header_name='thread',
+                           define_name = "USE_STD_THREAD")
+        except conf.errors.ConfigurationError:
+                pass
+
+        if conf.env.DEST_OS == 'linux' and conf.env.DEST_CPU == 'x86':
+                conf.env.append_value('CXXFLAGS', '-Wa,--32')
+                conf.env.append_value('CFLAGS', '-Wa,--32')
+        if conf.env.DEST_OS == 'win32':
+                # Enable exception handling
+                # ROOT uses EHs, additional c says that C code won't throw
+                conf.env.append_value('CXXFLAGS', '/EHsc')
+                # RTTI (same flags as ROOT)
+                conf.env.append_value('CXXFLAGS', '/GR')
+                # Also, multithreaded-DLL library
+                conf.env.append_value('CXXFLAGS', '/MD')
+
+        if conf.env.DEST_OS == 'linux' and conf.env.DEST_CPU in ['x86_64', 'amd64']:
+                conf.env.append_value('CXXFLAGS', '-fPIC')
+                conf.env.append_value('CFLAGS', '-fPIC')
+
+        # NB only looking in root directory, doesn't check build
+        #  which is where automatic version would be created
+        stsvnNode = conf.path.find_resource('stsvn.h')
+
+        if conf.options.enable_stsvn == False:
+                if stsvnNode is None:
+                        conf.env.wcrev_style = "dummy"
+                        conf.msg("Version information", "made up", color="BLUE")
+                        conf.options.enable_stsvn = True
+                else:
+                        conf.msg("Version information", "Using static stsvn.h", color="BLUE")
+                        conf.options.enable_stsvn = False
+        else:
+                svnDir = conf.path.find_dir('.svn')
+                gitDir = conf.path.find_dir('.git')
+                # How to find version info if using wcrev_task below
+                conf.env.wcrev_style = "dummy"
+                if svnDir is not None:
+                        conf.env.wcrev_style = "svn"
+                        conf.msg("Found svn repository", True)
+
+                        # To make stsvn.h
+                        if conf.env.DEST_OS == "win32":
+                                conf.find_program('SubWCRev')
+                        else:
+                                conf.find_program('svn')
+                                conf.find_program('svnversion')
+                elif gitDir is not None:
+                        conf.msg("Found git repository", True)
+                        try:
+                                conf.find_program('git')
+                                conf.env.wcrev_style = "git"
+                        except conf.errors.ConfigurationError:
+                                if conf.env.DEST_OS == "win32":
+                                        # On windows, git might not be in the path...
+                                        conf.env.wcrev_style = "dummy"
+                                        conf.msg("Version information", "made up", color="BLUE")
+                                else: raise
+                else:
+                        conf.msg("No repository information found",
+                                 "needed for version info", color="YELLOW")
+                        conf.msg("Checking manual stsvn.h is present", stsvnNode)
+                        conf.start_msg("Version information", color="YELLOW")
+                        if stsvnNode is None:
+                                conf.env.wcrev_style = "dummy"
+                                conf.end_msg("made up", color="BLUE")
+                        else:
+                                conf.end_msg("static stsvn.h", color="BLUE")
+                                conf.options.enable_stsvn = False
+
+        conf.findRoot()
+
+        try:
+                conf.load('python')
+                if conf.env.DEST_OS == 'win32':
+                        import sys
+                        if sys.version_info[:2] == (2,6):
+                                if os.getenv("VS100COMNTOOLS"):
+                                        conf.start_msg("Check python headers")
+                                        conf.end_msg("Bad python version 2.6")
+                                        raise conf.errors.ConfigurationError("2.6 MSVC10 check broken")
+                        if sys.version_info[:3] == (3,3,0):
+                                conf.start_msg("Check python headers")
+                                conf.end_msg("Bad python version 3.3.0")
+                                raise conf.errors.ConfigurationError("3.3.0 MSVC check broken")
+
+                conf.check_python_headers()
+
+                conf.env.enable_python = True
+        except conf.errors.ConfigurationError:
+                conf.env.enable_python = False
+        conf.line_just = 40
+
+        # Both Linux or Apple ('darwin')
+        if conf.env.DEST_OS != 'win32':
+                # Done worker, but still needed by hsiopipe, and fileSocket
+                if False: # conf.is_defined("USE_STD_THREAD"):
+                        boostLibs = conf.findBoost(True)
+                else:
+                        boostLibs = conf.findBoost(False)
+
+        # Enable NI-VISA?
+        if conf.env.DEST_OS == 'win32':
+                use_visa = True
+        else:
+                use_visa = False
+
+        if conf.options.enable_visa is not None:
+                use_visa = conf.options.enable_visa
+
+        conf.env.extraDLLs = ["KwikFit"]
+
+        if use_visa:
+                if conf.env.DEST_OS == 'win32':
+                        path_list=["C:\\Program Files\\IVI Foundation\\VISA\\WinNT\\include",
+                                   "C:\\Program Files (x86)\\IVI Foundation\\VISA\\WinNT\\include"]
+                        try:
+                                visa_h = conf.find_file("visa.h", path_list=path_list)
+                                find_base = visa_h[:-14]
+                        except conf.errors.ConfigurationError:
+                                # Not here
+                                find_base = ""
+
+                        visa_includes = ["%sinclude" % find_base]
+                        visa_libpath = ["%slib\\msc" % find_base]
+                else:
+                        visa_includes = ["/usr/local/include"]
+                        visa_libpath = ["/usr/local/lib"]
+
+                try:
+                        libName = "visa"
+                        if conf.env.DEST_CPU == 'x86':
+                                libName = "visa32"
+                        conf.check_cc(header_name='visa.h', lib=libName,
+                                      includes=visa_includes, libpath=visa_libpath,
+                                      uselib_store='VISA')
+                        conf.env.extraDLLs.extend(['interlock', 'khvdll', 'ttidll', 'tti_dcload_dll', 'iseghvdll'])
+                        # Uses VISA for some things, so put this here
+                        conf.env.extraDLLs.append('dcsdll')
+                except:
+                        if conf.options.enable_visa == True:
+                                # Only throw if user said to enable
+                                raise
+                        # If default, just don't use it
+                        use_visa = False
+
+        try:
+                vxi_includes = []
+                vxi_libpath = []
+                
+                if conf.env.DEST_OS == 'win32':
+                        vxi_includes.append("C:\\Program Files\\National Instruments\\VXI\\NIVXI API\\include")
+                        vxi_libpath.append("C:\\Program Files\\National Instruments\\VXI\\NIVXI API\\win32\\msvc6")
+                conf.check_cc(header_name='nivxi.h', lib='nivxint',
+                              includes=vxi_includes, libpath=vxi_libpath,
+                              uselib_store='NIVXI')
+        except:
+                pass
+
+        if conf.env.DEST_OS == 'win32':
+                libs = ['Ws2_32', 'Iphlpapi']
+                conf.check_cc(header_name='winsock2.h',
+                              lib = libs,
+                              uselib_store='WS')
+
+        if conf.options.enable_pcap is not False:
+                try:
+                        if conf.env.DEST_OS == 'win32':
+                                pcapDefines = "WIN32"
+                                pcapIncludes = 'C:\\develop\\WpdPack\\Include'
+                                pcapLibs = ['Packet', 'wpcap', 'Ws2_32']
+                                pcapLibPath = 'C:\\develop\\WpdPack\\lib'
+                        else:
+                                pcapDefines = []
+                                pcapLibs = ['pcap']
+                                pcapIncludes = []
+                                pcapLibPath = []
+
+                        conf.check_cc(header_name='pcap.h',
+                                      defines = pcapDefines,
+                                      includes = pcapIncludes,
+                                      lib = pcapLibs,
+                                      libpath = pcapLibPath,
+                                      uselib_store='PCAP')
+                except conf.errors.ConfigurationError:
+                        pass
+
+        # On VC10, there's a conflict with something set up by python
+        try:
+                conf.check_cc(header_name='stdint.h', use="pyext",
+                              msg="Look for stdint.h (with Python path)",
+                              okmsg="Use python config for stdint.h",
+                              errmsg="Not found")
+        except conf.errors.ConfigurationError:
+                conf.check_cc(header_name='stdint.h',
+                              msg="Look for stdint.h (default path)",
+                              okmsg="Use default config for stdint.h",
+                              errmsg="Not found")
+
+        try:
+                # The csdll version will fail on linux,
+                # should look for the proper version
+                conf.check_cxx(header_name = 'ftd2xx.h',
+                               includes = 'csdll')
+                conf.env.extraDLLs.append('csdll')
+        except conf.errors.ConfigurationError:
+                pass
+
+        if conf.options.use_ni6562:
+                conf.check_cc(header_name = ['niHSDIO.h', 'niHWS.h', 'NIDAQmx.h'], lib = ['niHSDIO', 'nihws'],
+                              uselib_store = 'NI6562', msg = 'Checking for NI-6562 headers',
+                              includes = ["C:\\Program Files\\IVI Foundation\\VISA\\WinNT\\include",
+                                          "C:\\Program Files\\National Instruments\\NI-HWS\\include",
+                                          "C:\\Program Files\\National Instruments\\NI-DAQ\\DAQmx ANSI C Dev\\include"],
+                              libpath = ["C:\\Program Files\\IVI Foundation\\VISA\\WinNT\\lib\\msc",
+                                         "C:\\Program Files\\National Instruments\\NI-HWS\\Lib"],
+                )
+
+        # Directories that get built into stdll
+        conf.env.stdll_libs = ['stlib', 'worker']
+
+        if len(conf.env.LIB_NIVXI) > 0:
+                conf.env.stdll_libs.extend(['scthv'])
+
+        conf.env.enable_tests = False
+        if conf.options.use_hsio:
+                conf.env.stdll_libs.append('hsio_lib')
+                conf.env.stdll_libs.append('onewire')
+
+                if conf.options.enable_tests:
+                        conf.env.enable_tests = True
+
+                if (conf.env.DEST_OS != 'win32' and "program_options" not in boostLibs):
+                        raise conf.errors.ConfigurationError("Need program_options (from boost) to build hsioPipe")
+
+        if conf.options.use_ni6562:
+                conf.env.stdll_libs.extend(['ni6562_lib', 'MUXlib'])
+
+        conf.env.enable_compile_macros = False
+        if conf.options.enable_compile_macros:
+                conf.env.enable_compile_macros = True
+
+                conf.findEUDAQ()
+
+        # Defines to enable parts of software
+        conf.env.use_hsio = conf.options.use_hsio
+        conf.env.use_ni6562 = conf.options.use_ni6562
+
+        conf.start_msg("Using HSIO")
+        conf.end_msg(['no','yes'][conf.env.use_hsio])
+        conf.start_msg("Using VISA")
+        conf.end_msg(['no','yes'][use_visa])
+        conf.start_msg('Using ni6562')
+        conf.end_msg(['no','yes'][conf.env.use_ni6562])
+
+        conf.start_msg("Building DLLS")
+        conf.end_msg(", ".join(['stdll'] + conf.env.extraDLLs))
+        conf.start_msg("Dirs to link in stdll")
+        conf.end_msg(", ".join(conf.env.stdll_libs))
+
+        conf.start_msg("Building python extension")
+        conf.end_msg(conf.env.enable_python)
+
+        conf.start_msg("Build tests")
+        conf.end_msg(conf.env.enable_tests)
+        conf.start_msg("Build (some) macros")
+        conf.end_msg(conf.env.enable_compile_macros)
+
+        if conf.options.enable_stsvn == False:
+                conf.env.SKIP_STSVN = True
+        else:
+                conf.env.SKIP_STSVN = False
+
+        if conf.env.use_hsio:
+                conf.define("USE_HSIO", 1)
+        elif conf.env.use_ni6562:
+                conf.define("NI6562_NUMBER", 1)
+
+        # Put the defines in a config header (for sct_hardware.h)
+        conf.write_config_header('wafconfig.h', remove=False)
+        conf.write_config_header('debug/wafconfig.h', guard="W_WAFCONFIG_H_WAF")
+
+        # Tell sct_hardware.h that it's there
+        conf.define('HAVE_CONFIG_H', '1')
+        conf.env.append_value("INCLUDES", '.')
+        if conf.env.DEST_OS == 'win32':
+                conf.define('WIN32', '')
+
+        releaseEnv = conf.env
+
+        conf.setenv('debug', releaseEnv)
+
+        if conf.env.DEST_OS != 'win32':
+                conf.env.append_value('CXXFLAGS', '-g')
+                conf.env.append_value('LINKFLAGS', '-g')
+
+        # Now add optimisation to the unchanged version
+        if releaseEnv.DEST_OS != 'win32':
+                releaseEnv.append_value('CXXFLAGS', '-O3')
+                releaseEnv.append_value('LINKFLAGS', '-O3')
+                arch = conf.env.GCC_ARCH
+                if arch:
+                        releaseEnv.append_value('CXXFLAGS', '-mtune=%s' % arch)
+                        releaseEnv.append_value('CXXFLAGS', '-march=%s' % arch)
+
+def build(bld):
+        win32 = bld.env.DEST_OS == 'win32'
+
+        install_prefix = bld.top_dir
+        bin_dir = "%s/bin" % install_prefix
+
+        if bld.env.use_hsio:
+                # hsio
+                hsioSrcNames = ['hsioAccess', 'hsioBuffer', 'hsioDebug', 'hsioException', 'hsioPacket', 'hsio_c']
+                hsioSrcNames += ['macAddress', 'ipLookup']
+                hsioSrcNames += ['rawPacket', 'socketFactory']
+                hsioSrcNames += ['simSocket']
+
+                hsioDefines = []
+                if len(bld.env['LIB_PCAP']) > 0:
+                        hsioSrcNames.append('pcapSocket')
+                        # Tell socketFactory etc it's available
+                        hsioDefines.append('USE_PCAP')
+                # For the moment, these don't compile on OS X
+                if not win32 and (bld.env.DEST_OS == 'linux'):
+                        hsioSrcNames.extend(['rawSocket', 'fileSocket'])
+                hsioSrcNames += ['udpSocket']
+                srcs = ['hsio/%s.cc' % s for s in hsioSrcNames]
+
+                hsioLibs = []
+                if win32:
+                        # Has GetAdaptersAddresses, not sure why it's needed by testMacAddresses but nothing else...
+                        hsioLibs.append("Iphlpapi")
+
+                bld.stlib(source=srcs,
+                          defines = hsioDefines,
+                          target='hsio_lib',
+                          use='PCAP WS BOOST_THREAD')
+
+                if len(bld.env['LIB_BOOST_PO']) > 0:
+                        bld.program(target='hsioPipe',
+                                    defines = hsioDefines,
+                                    install_path = bin_dir,
+                                    source='hsio/hsioPipe.cc',
+                                    use='hsio_lib BOOST_THREAD BOOST_PO')
+                        bld.program(target='cardSim',
+                                    defines = hsioDefines,
+                                    install_path = None,
+                                    source='hsio/cardSim.cc',
+                                    use='hsio_lib BOOST_THREAD BOOST_PO')
+                        bld.program(target='host',
+                                    defines = hsioDefines,
+                                    install_path = None,
+                                    source='hsio/host.cc',
+                                    use='hsio_lib BOOST_THREAD BOOST_PO')
+
+                bld.program(target='testMacAddress',
+                            defines = hsioDefines,
+                            install_path = bin_dir,
+                            lib = hsioLibs,
+                            source='hsio/testMacAddress.cc',
+                            use='hsio_lib WS')
+
+                bld.program(target='testIpAddress',
+                            defines = hsioDefines,
+                            install_path = bin_dir,
+                            lib = hsioLibs,
+                            source='hsio/testIpAddress.cc',
+                            use='hsio_lib WS')
+
+        # stlib (this list also for unittests)
+        stlibFiles = ['abc', 'abc130', 'abc_decode', 'amac1', 'bits',
+                      'hcc', 'st_config', 'st_debug', 'st_error',
+                      'st_fwinfo', 'stlib', 'stout']
+
+        srcNames = stlibFiles + ['spi', 'VMEtest']
+
+        if bld.env.use_hsio:
+                srcNames.append('stlib_hsio')
+        elif bld.env.use_ni6562:
+                srcNames.append('stlib_ni6562')
+
+        srcs = ['stlib/%s.cpp' % s for s in srcNames]
+
+        stlibDefines = []
+        bld.stlib(source=srcs, target='stlib',
+                  defines = stlibDefines, use="BOOST_THREAD")
+
+        # worker
+        srcNames = ['worker']
+        srcs = ['worker/%s.cpp' % s for s in srcNames]
+
+        workerDefines = []
+        bld.stlib(source=srcs, target='worker',
+                  defines = workerDefines, use="BOOST_THREAD")
+
+        # VME stuff (only SCTHV left)
+
+        if len(bld.env.INCLUDES_NIVXI) > 0:
+                vmeDefines = ['NIVXI']
+        else:
+                vmeDefines = []
+
+        stlibs_info = {
+            'scthv': (['scthv_lib'], 'NIVXI'),
+            'onewire': (['onewire_lib'], ''),
+            'ni6562_lib': (['ni6562_lib.cpp'], 'NI6562'),
+            'MUXlib': (['MUXlib.c'], 'VISA NI6562'),
+        }
+
+        for dirname in bld.env.stdll_libs:
+                if dirname not in stlibs_info:
+                        continue
+                cfiles, uses = stlibs_info[dirname]
+                bld.stlib(source = ['%s/%s.cpp' % (dirname, c) for c in cfiles],
+                          defines = vmeDefines, use = uses,
+                          target = dirname)
+
+        # stdll
+        stdll_cint = rootcint(env=bld.env)
+
+        stdll_cls = ["stdll/%s" % s for s in
+                     ["TLogger.h", "TModuleDCS.h", "TModule.h", "../dcsdll/TDCSDevice.h",
+                      "TSequencer.h", "TSignals.h", "TST.h", "TChip.h", "HVStripV1.h", "linkdef.h"]]
+
+        stdll_in = [bld.path.find_resource(c) for c in stdll_cls]
+
+        stdll_cint.set_inputs(stdll_in)
+        stdll_cint.build_outs(bld, 'stdll', 'stdll')
+
+        if bld.env.root_version6:
+                # Install pcm file
+                bld.install_files(bin_dir,
+                                  stdll_cint.outputs[1])
+
+        bld.add_to_group(stdll_cint)
+
+        srcNames = ['TST', 'TModule', 'TModuleDCS',
+                    'TSTBurstManager', 'EventManager']
+        srcNames += ['dcs_message', 'functions']
+        srcNames += ['stdll_cint']
+        srcNames += ['TLogger', 'TSignals']
+        srcNames += ['ABC130Decoder']
+        srcNames += ['HVStripV1']
+        if bld.env.use_hsio:
+                srcNames.append('THSIOSequencer')
+
+        srcs = ['stdll/%s.cpp' % s for s in srcNames]
+        # srcs[1] = 'stdll/TModule.testing.cpp'
+
+        linkLibs = ' '.join(bld.env.stdll_libs)
+
+        bld.shlib(target='stdll', source=srcs,
+                  includes=['stdll'],
+                  install_path = bin_dir,
+                  use = linkLibs + ' PCAP ROOT')
+
+        if bld.env.enable_tests:
+                bld.stlib(target='stdll_static', source=srcs,
+                          includes=['stdll'],
+                          use = linkLibs + ' PCAP ROOT')
+
+        # Access DCS things using serial port
+        #  Currently use NI VISA
+        dcsList = []
+
+        # Tuple of:
+        #  Single or List of cpp files named after classes to be used in ROOT
+        #  DLL name
+        #  External requirements
+        #  Other cpp files to be linked in as well
+        allDcsList = {
+                'csdll': ('TCS', 'csdll', ['FTDI'], []),
+                'dcsdll': (['TDCS', 'TAD7998', 'TSHT71',
+                            'TDS2408', 'TDS1820'],
+                            'dcsdll', ['hsio_lib', 'onewire', 'PCAP', 'VISA'], []),
+                'interlock': ('TILock', 'tilockdll', ['VISA'], []),
+                'iseghvdll': ('TisegHV', 'iseghvdll', ['VISA'], []),
+                'khvdll': ('TkHV', 'khvdll', ['VISA'], []),
+                'ttidll':  ('TTi', 'ttidll', ['VISA'], []),
+                'tti_dcload_dll':  ('TTi_dcload', 'tti_dcload_dll', ['VISA'], []),
+                'KwikFit':  ('TKwikFit', 'KwikFit', [], ['../stdll/functions']),
+                }
+
+        if len(bld.env.INCLUDES_VISA) > 0:
+                # Interlock needs VISA
+                allDcsList["dcsdll"][0].extend(['TILOCK2', '../interlock/TILock'])
+                allDcsList["dcsdll"][2].append('VISA')
+
+        for dirname, (cpp_classes, dllname, uses, extra_cpp) in allDcsList.items():
+                if dirname not in bld.env.extraDLLs:
+                        continue
+
+                dll_cint = rootcint(env=bld.env)
+
+                if type(cpp_classes) is not list:
+                        dll_cls = ["%s/%s.h" % (dirname, cpp_classes)]
+                        dllsrcs = ['%s/%s.cpp' % (dirname, cpp_classes),
+                                   '%s/%s_cint.cpp' % (dirname, dllname)]
+                else:
+                        dll_cls = ["%s/%s.h" % (dirname, c) for c in cpp_classes]
+                        dllsrcs = ['%s/%s_cint.cpp' % (dirname, dllname)]
+                        dllsrcs.extend(['%s/%s.cpp' % (dirname, c)
+                                       for c in cpp_classes])
+
+                dll_in = [bld.path.find_resource(c) for c in dll_cls]
+                dll_cint.set_inputs(dll_in)
+
+                dll_cint.build_outs(bld, dirname, dllname)
+
+                dllsrcs.extend([bld.path.find_resource('%s/%s.cpp' % (dirname, c)) for c in extra_cpp])
+
+                if bld.env.root_version6:
+                        # Install pcm file
+                        bld.install_files(bin_dir, dll_cint.outputs[1])
+
+                bld.add_to_group(dll_cint)
+
+                bld.shlib(source=dllsrcs,
+                          target=dllname,
+                          install_path = bin_dir,
+                          use = uses + ['ROOT'])
+
+        bld.program(target='testLink', install_path=None,
+                    source='stdll/testLink.cc', use='stdll ROOT BOOST_THREAD')
+
+        # Is stlib reletaively standalone
+        bld.program(target='testLinkStlib', install_path=None,
+                    source='stlib/testLink.cpp', use='stlib hsio_lib')
+
+        if not bld.env.SKIP_STSVN:
+                if bld.env.wcrev_style == "svn" and bld.env.SUBWCREV:
+                        target = bld.path.find_or_declare('stsvn.h')
+                        target = target.get_bld()
+                        b = bld(rule='SubWCRev "%s" ${SRC} ${TGT}' % bld.top_dir,
+                            source = 'stsvn_template.h', target = target, always = True)
+                else:
+                        global wcrev_task
+                        makeSVNInfo = wcrev_task(env=bld.env)
+                        makeSVNInfo.set_inputs(bld.path.find_resource('stsvn_template.h'))
+                        makeSVNInfo.always_run = True
+                        stsvn = bld.path.find_or_declare('stsvn.h')
+                        makeSVNInfo.set_outputs(stsvn)
+                        bld.add_to_group(makeSVNInfo)
+
+        if bld.env.enable_tests:
+                options = {'install_path': None}
+                if not win32:
+                        # To find stdll
+                        options['rpath'] = [bld.path.get_bld().abspath()]
+                bld.program(target='testFitting',
+                            source='unittests/testFitting.cpp',
+                            use='stdll_static ROOT BOOST_THREAD',
+                            **options)
+
+                bld.program(target='testDecoder',
+                            source=['unittests/decoding/main.cpp',
+                                    'unittests/decoding/hccPackets.cpp',
+                                    'unittests/decoding/hccPackets2.cpp'],
+                            use='stdll_static ROOT',
+                            **options)
+
+                bld.program(target='testWorker',
+                            source='worker/test/test.cpp',
+                            use='BOOST_THREAD worker',
+                            **options)
+
+                testFiles = ['runTests', 'testABC130ChipPresent', 'testABC130CalMasks', 'testConfigure', 'testExecuteConfig',
+                             'testCheckConfig',
+                             'testLoadConfig', 'testShowSysmap',
+                             'testSlowCommand', 'testWriteConfig']
+                testFiles += ['stlib_dummy_hsio']
+                testIncludes = 'stlib'
+                options = {"install_path": None}
+                if not win32:
+                        # To find stdll
+                        options['lib'] = ['m']
+                bld.program(target='runTests',
+                            includes=testIncludes,
+                            source=['unittests/%s.cpp' % t for t in testFiles]
+                                 + ['stlib/%s.cpp' % s for s in stlibFiles],
+                            **options)
+
+                # Use abspath so it can find the binary, also run in unittests dir
+                def runRule(task):
+                        src = task.inputs[0].abspath()
+                        tgt = task.outputs[0].abspath()
+                        cmd = '"%s" > "%s"' % (src, tgt)
+                        env = {}
+                        if task.env.DEST_OS == 'win32':
+                                env = {"PATH": "%s/bin" % task.env.ROOTSYS}
+                        else:
+                                oldllp = os.getenv("LD_LIBRARY_PATH")
+                                env['LD_LIBRARY_PATH'] = '%s:%s' % (oldllp, "%s/lib" % bld.env["ROOTSYS"])
+                        if task.env.root_version6:
+                                # Needs to find compiler we're using
+                                env["PATH"] = os.getenv("PATH")
+
+                        return task.exec_command(cmd, cwd='unittests', env=env)
+
+                bld(rule=runRule,
+                    source = bld.env["cxxprogram_PATTERN"] % 'runTests', target = 'unittestOutput.txt')
+                bld(rule=runRule,
+                    source = bld.env["cxxprogram_PATTERN"] % 'testFitting', target = 'fittingOutput.txt')
+                bld(rule=runRule,
+                    source = bld.env["cxxprogram_PATTERN"] % 'testDecoder', target = 'decoderOutput.txt')
+                bld(rule=runRule,
+                    source = bld.env["cxxprogram_PATTERN"] % 'testWorker', target = 'workerOutput.txt')
+
+                if win32:
+                        diffrule = 'fc ${SRC[0]} ${SRC[1].abspath()}'
+                else:
+                        diffrule = 'diff "${SRC[0]}" "${SRC[1].abspath()}"'
+                bld(rule=diffrule,
+                    source = ['fittingOutput.txt',
+                              bld.path.find_resource('unittests/fittingOutput.expected')])
+                bld(rule=diffrule,
+                    source = ['unittestOutput.txt',
+                              bld.path.find_resource('unittests/unittestOutput.expected')])
+                bld(rule=diffrule,
+                    source = ['decoderOutput.txt',
+                              bld.path.find_resource('unittests/decoderOutput.expected')])
+                bld(rule=diffrule,
+                    source = ['workerOutput.txt',
+                              bld.path.find_resource('unittests/workerOutput.expected')])
+
+                if len(bld.env['LIB_BOOST_TEST']) > 0:
+                        # Build and run HSIO unit tests
+                        bld.program(target='testHsio',
+                                    source='hsio/UnitTest/testSuite.cc',
+                                    use='hsio_lib BOOST_THREAD BOOST_TEST',
+                                    **options)
+                        test_suite_options = "--report_level=detailed --report_format=xml --report_sink=boost_test_output.xml"
+                        if bld.env.boost_test_output_broken:
+                                test_suite_options = ""
+                        bld(rule="'${SRC[0].abspath()}' %s" % test_suite_options,
+                            source = bld.env["cxxprogram_PATTERN"] % 'testHsio')
+ 
+        if bld.env.use_hsio and bld.env.enable_python:
+                # Build them all again using the python build flags
+                sources = ["hsio/%s.cc" % h for h in hsioSrcNames]
+                sources.append("hsio/hsioModule.cc")
+                uses = ['PCAP', 'BOOST_THREAD', 'WS']
+
+                bld.shlib(features = 'pyext',
+                          source=sources,
+                          defines = hsioDefines,
+                          target="hsio",
+                          install_path="%s/python" % bin_dir,
+                          use = uses)
+                hsioModuleName = bld.env["pyext_PATTERN"] % "hsio"
+                bld(rule='%s -c "import hsio; hsio.init(\'sim\')"' % bld.env["PYTHON"][0],
+                    source=bld.path.find_or_declare(hsioModuleName))
+
+        if bld.env.enable_compile_macros:
+                ch = bld.path.find_or_declare('macros/compileHeaders.h')
+                if win32:
+                        cflags = ['/FIcompileHeaders.h']
+                else:
+                        cflags = ['-include', ch.abspath()]
+                        if bld.env.root_version6:
+                                # Get the same environment as when we run
+                                cflags.append("-DITSDAQ_ROOT6_DEFINE")
+
+                allMacros = ["macros/ToolBox.cpp"]
+                allMacros.extend(["macros/BurstSetup.cpp"])
+                allMacros.extend(["macros/Signals.cpp"])
+                allMacros.extend(["macros/TestRegistry.cpp"])
+
+                macroNames = []
+
+                allMacros.extend(["macros/ABCNTrimRange.cpp"])
+                macroNames.extend(["ABCNNo", "ABCNNoPlot",
+                                   "ABCNNoiseTrimPlot", "ABCNResponseCurve",
+                                   "ABCNTimewalk", "ABCNTrimRange"])
+
+                macroNames.extend(["Stavelet", "STGUIStavelet",
+                                   "STGUI"])
+
+                allMacros.extend(["macros/CaptureWhatever.cpp", "macros/CheckBitPattern.cpp"])
+                allMacros.extend(["macros/ABC130StrobeDelay.cpp"])
+                allMacros.extend(["macros/ABC130StrobeDelayPlot.cpp",
+                                  "macros/ABC130ResponseCurvePlot.cpp",
+                                  "macros/ABC130TrimRange.cpp",
+                                  "macros/ABC130TrimRangePlot.cpp",
+                                  "macros/ABC130TrimRangeSingleChipPlot.cpp"])
+
+                macroNames.extend(["ABC130Timewalk", "ABC130TimewalkPlot",
+                                   "ABC130ThreePointCalScan",
+                                   "ABC130ResponseCurve",
+                                   "ABC130ResponseCurveChargePlot",
+                                   "ABC130No", "ABC130NoPlot",
+                                   "ABC130NoiseTrimPlot"])
+
+                macroNames.extend(["abc130_test", "hcc_test"])
+
+                notQuite = ["abc130_scan_test", "abc130_tv", "ABC130ASICTest"]
+
+                if bld.env.root_version6:
+                        # Some macros we only compile in root 6
+                        macroNames.extend(["STGUIPopups", "hsioUtils", "KwikFit",
+                                           "CaptureWhateverABC130",
+                                           "ABC130ThreePointGain"])
+                allMacros.extend(["macros/%s.cpp" % m for m in macroNames])
+
+                bld.objects(source = allMacros, cxxflags = cflags,
+                            includes = ['macros'], use = ["ROOT"])
+
+                if bld.env.enable_eudaq:
+                        # Compile ITSDAQ interface
+                        theMacro = "macros/eudaq/itsdaqInterface.cxx"
+                        bld.objects(source = theMacro, cxxflags = cflags,
+                                    includes = ['macros'],
+                                    use = ["ROOT", "EUDAQ"])
+
+from waflib.Build import BuildContext, CleanContext, InstallContext, UninstallContext
+
+for y in (BuildContext, CleanContext, InstallContext, UninstallContext):
+        name = y.__name__.replace('Context','').lower()
+        class tmp(y):
+                cmd = name + '_debug'
+                variant = "debug"
+                __doc__ = y.__doc__ + " in debug mode"
+
+import time
+
+from waflib.Task import Task
+from waflib.Tools import c_preproc
+from waflib.Logs import debug
+class rootcint(Task):
+        vars = ["ROOT_VERSION_EXTRACTED"]
+
+        def run(self):
+                ins = " ".join(['"%s"' % i.abspath() for i in self.inputs])
+                # Makefile puts "-p $CFLAGS" in as well (after -c)
+                if self.env.DEST_OS == 'win32':
+                        # For some reason rootcint sometimes needs TEMP set
+                        env = {"ROOTSYS": self.env["ROOTSYS"], "TEMP": os.getenv("TEMP")}
+                else:
+                        # With ROOT on afs, needs path to find libstdc++ too
+                        #  Should be doing this in config though!
+                        oldllp = os.getenv("LD_LIBRARY_PATH")
+                        env = {'LD_LIBRARY_PATH':
+                                 '%s:%s' % (oldllp, "%s/lib" % self.env["ROOTSYS"])}
+                        oldp = os.getenv("PATH")
+                        if self.env.root_version6:
+                                # So root can find gcc?
+                                env["PATH"] = oldp
+
+                cmd = ('%s/bin/rootcint -f "%s" -c %s'
+                                         % (self.env.ROOTSYS,
+                                            self.outputs[0].abspath(),
+                                            ins))
+                # print(cmd)
+                return self.exec_command(cmd, env=env)
+
+        def scan(self):
+                # Add deps from input headers
+                cp = c_preproc.c_parser()
+                for i in self.inputs:
+                        cp.start(i, self.env)
+                debug('rootcint: . calling the scanner method')
+                return (self.inputs + cp.nodes, time.time())
+
+        def build_outs(self, ctx, dirname, dllname):
+                # print("Building names for rootcint outputs")
+                # print(self.env.root_version6)
+
+                outs = ['%s/%s_cint.cpp']
+                if self.env.root_version6:
+                        outs.append('%s/%s_cint_rdict.pcm')
+                else:
+                        outs.append('%s/%s_cint.h')
+
+
+                outNodes = [ctx.path.find_or_declare(c % (dirname, dllname)).get_bld()
+                            for c in outs]
+
+                self.set_outputs(outNodes)
+
+from waflib.Configure import conf
+
+def getBoostDirs(ctx):
+        # Override with cmdline options
+        if ctx.options.with_boost != "":
+                boost_inc = ctx.options.with_boost
+        else:
+                boost_inc = os.getenv("BOOSTDIR")
+
+        if boost_inc is None:
+                if ctx.env.DEST_OS == 'darwin':
+                        return ["/usr/local/include", "/usr/local/lib", ["-mt", ""]]
+
+                # Try and use system version (probably won't work)
+                #    -mt is the multithreaded version on slc6
+                #        try that one first,
+                #    but other distros don't have -mt but are still
+                #    multithreaded
+                return [[], [], ["-mt",""]]
+
+        if (("afs" in boost_inc) or ("cvmfs" in boost_inc)) and ("ATLASLocalRootBase" in boost_inc):
+                # "standard" ATLAS setup eg:
+                #   /cvmfs/atlas.cern.ch/repo/ATLASLocalRootBase/x86_64/boost/...
+                #  .../boost-1.55.0-python2.7-x86_64-slc6-gcc48/...
+                #  .../boost-1.55.0-python2.7-x86_64-slc6-gcc48/include
+                return boost_inc, [boost_inc + "/../lib"], [""]
+
+        if ("afs" in boost_inc) or ("cvmfs" in boost_inc):
+                # /afs/cern.ch/sw/lcg/external/Boost/...
+                #  .../1.50.0_python2.7/x86_64-slc5-gcc43-opt/include/boost-1_50
+                # /cvmfs/sft.cern.ch/lcg/release/LCG_83/Boost/...
+                #  .../1.59.0_python2.7/x86_64-slc6-gcc49-opt/include/boost-1_59
+                dirs = boost_inc.split('/')[-5:]
+                if dirs[0] != 'Boost':
+                        ctx.fatal("Can't work out postfix for boost_thread library from %s" % dirs)
+                else:
+                        ver_pf = dirs[4][-4:]
+                        gcc_pf = dirs[2].split('-')[2]
+                        postfix = '-%s-mt-%s' % (gcc_pf, ver_pf)
+                boost_lib = boost_inc + "/../../lib"
+                return boost_inc, [boost_lib], [postfix]
+
+        boost_lib = boost_inc + "/../lib"
+        return boost_inc, [boost_lib], ["-mt", ""]
+
+@conf
+def findBoost(ctx, skipThreads = False):
+        # TODO:
+        #  Want to find:
+        #   boost_thread
+        #   boost_program_options
+        #   boost_test_exec_monitor
+        #   boost_unit_test_framework
+
+        foundLibs = []
+
+        ctx.start_msg('Checking BOOST version')
+
+        boost_inc, boost_lib, post_fixes = getBoostDirs(ctx)
+
+        ctx.check_cc(fragment='''#include "boost/version.hpp"
+                        int main() {printf("%s", BOOST_LIB_VERSION);
+                        return 0; }''',
+                     define_ret=True, execute=True, define_name='BVERSION',
+                     add_have_to_env = 0, includes=boost_inc)
+        boost_version = ctx.get_define("BVERSION")[1:-1] # Remove ""s
+        ctx.undefine("BVERSION")
+        # Something like 1_53
+        ctx.end_msg(boost_version)
+
+        boost_minor_version = int(boost_version.split("_")[1])
+
+        if boost_minor_version < 41:
+                raise ctx.errors.ConfigurationError("BOOST found, but version is too old")
+
+        if boost_minor_version == 62:
+                ctx.env.boost_test_output_broken = True
+
+        post_fix = None
+
+        # Darwin (and apparently windows) needs boost_system too
+        #  might as well link it everywhere
+        for pf in post_fixes:
+                ctx.start_msg('Checking for BOOST system')
+
+                system_name = 'boost_system%s' % pf
+
+                try:
+                        ctx.check_cxx(header_name="boost/system/error_code.hpp",
+                                      includes=boost_inc,
+                                      lib=[system_name],
+                                      libpath=boost_lib,
+                                      rpath=boost_lib,
+                                      uselib_store='BOOST_SYSTEM')
+                        foundLibs.append("system")
+                except ctx.errors.ConfigurationError:
+                        if len(post_fixes) > 1:
+                                ctx.end_msg('Not with post-fix %s' % pf)
+                                continue
+                        else:
+                                raise
+
+                ctx.end_msg(' '.join(ctx.env.LIB_BOOST_SYSTEM))
+
+                post_fix = pf
+
+                # Found a good version
+                break
+
+        if post_fix is None:
+                raise ctx.errors.ConfigurationError("Couldn't find BOOST system library with any post_fix")
+
+        if not skipThreads:
+                ctx.start_msg('Checking for BOOST thread')
+
+                thread_name = 'boost_thread%s' % post_fix
+                try:
+                        ctx.check_cxx(header_name="boost/thread/thread.hpp",
+                                      includes=boost_inc,
+                                      lib=[thread_name, system_name],
+                                      libpath=boost_lib,
+                                      rpath=boost_lib,
+                                      uselib_store='BOOST_THREAD')
+                        foundLibs.append("thread")
+                except ctx.errors.ConfigurationError:
+                        pass
+
+                if len(ctx.env['LIB_BOOST_THREAD']) < 1:
+                        ctx.fatal("Can't find BOOST library")
+                ctx.end_msg(' '.join(ctx.env.LIB_BOOST_THREAD))
+
+        ctx.start_msg('Checking for BOOST program options')
+
+        po_name = 'boost_program_options%s' % post_fix
+        try:
+                ctx.check_cxx(header_name="boost/program_options.hpp",
+                              includes=boost_inc,
+                              lib=[po_name, system_name],
+                              libpath=boost_lib,
+                              rpath=boost_lib,
+                              uselib_store='BOOST_PO')
+                foundLibs.append("program_options")
+        except ctx.errors.ConfigurationError:
+                pass
+
+        if len(ctx.env['LIB_BOOST_PO']) < 1:
+                ctx.end_msg("no")
+        else:
+                ctx.end_msg(' '.join(ctx.env.LIB_BOOST_PO))
+
+        ctx.start_msg('Checking for BOOST unit test')
+
+        # Used to use boost_test_exec_monitor
+        test_name = 'boost_unit_test_framework%s' % post_fix
+        try:
+                ctx.check_cxx(header_name="boost/test/minimal.hpp",
+                              includes=boost_inc,
+                              fragment='#include "boost/test/minimal.hpp"\nint test_main(int, char**) {}\n',
+                              lib=[test_name, system_name],
+                              libpath=boost_lib,
+                              rpath=boost_lib,
+                              uselib_store='BOOST_TEST')
+                foundLibs.append("test")
+        except ctx.errors.ConfigurationError:
+                pass
+
+        if len(ctx.env['LIB_BOOST_TEST']) < 1:
+                ctx.end_msg("no")
+        else:
+                ctx.end_msg(' '.join(ctx.env.LIB_BOOST_TEST))
+
+        return foundLibs
+
+@conf
+def findRoot(conf):
+        if len(conf.options.with_rootsys):
+                rs = conf.options.with_rootsys
+        elif os.getenv("ROOTSYS"):
+                rs = os.getenv("ROOTSYS")
+                conf.msg("Using ROOTSYS from env", rs)
+        elif conf.env.DEST_OS == "win32":
+                rs = "c:/root"
+                conf.msg("Using default ROOTSYS on windows", rs)
+        else:
+                try:
+                        conf.find_program('root')
+                        rs = "/usr"
+                        conf.msg("Using system root", rs)
+                except:
+                        conf.fatal("Can't find ROOT, use --with-rootsys or set $ROOTSYS")
+
+        conf.find_program('root', path_list=["%s/bin" % rs], var='ROOT_PATH')
+
+        # Strip off bin/root
+        if type(conf.env.ROOT_PATH) is str:
+                # In 1.8 can be a list, which is presumably if it includes some arguments
+                conf.env.ROOTSYS = "/".join(conf.env.ROOT_PATH.replace("\\", "/").split("/")[:-2])
+        else:
+                conf.env.ROOTSYS = "/".join(conf.env.ROOT_PATH[0].replace("\\", "/").split("/")[:-2])
+        conf.start_msg("Checking ROOTSYS")
+        conf.end_msg(conf.env.ROOTSYS)
+
+        if conf.env.DEST_OS == "win32":
+                # Sometimes rmtree fails on Windows (deleting testbuild)
+                #  Particularly seen running under Jenkins
+                #  Apparently this is to do with a race betweeen marking files
+                #    for deletion and checking the files in the directory are gone...
+                import shutil
+                oldrmtree = shutil.rmtree
+                def ignorermtree(dir, ignore_errors=False, onerror=None):
+                        try:
+                                oldrmtree(dir, ignore_errors, onerror)
+                        except:
+                                print("Supressing first error from shutils.rmtree, trying again")
+                                time.sleep(0.1)
+                                try:
+                                        oldrmtree(dir, ignore_errors, onerror)
+                                except:
+                                        print("Supressing second error from shutils.rmtree, Assume rmtree will succeed this time")
+                shutil.rmtree = ignorermtree
+
+        if conf.env.DEST_OS != "win32":
+                conf.check_cfg(path='%s/bin/root-config' % conf.env.ROOTSYS,
+                               args='--cflags --libs', package='', msg='Read root-config',
+                               uselib_store='ROOT_config')
+                conf.line_just = 40
+                rootLibs = conf.env.LIB_ROOT_config
+                # For some reason this is missing from lxplus
+                try: rootLibs.remove("Graf3d")
+                except ValueError: pass
+                # For some reason this is missing for CentOS 7!
+                try: rootLibs.remove("MultiProc")
+                except ValueError: pass
+                rootLibPath = conf.env.LIBPATH_ROOT_config
+                rootIncPath = conf.env.INCLUDES_ROOT_config
+        else:
+                rootLibs = ['libCint', 'libCore', 'libGraf', 'libHist', 'libMathCore', 'libMinuit', 'libRIO',
+                            'libNet', 'libRint', 'libTree', 'libWin32gdk']
+                rootLibPath = "%s/lib" % conf.env.ROOTSYS
+                rootIncPath = "%s/include" % conf.env.ROOTSYS
+
+        conf.check_cxx(includes = rootIncPath,
+                       header_name='TROOT.h',
+                       libpath=rootLibPath,
+                       rpath=rootLibPath, lib=rootLibs,
+                       uselib_store='ROOT', msg='Checking ROOT')
+        if conf.env.DEST_OS == "win32":
+                try:
+                        conf.check_cxx(includes = rootIncPath,
+                                       header_name='TTimeStamp.h',
+                                       libpath=rootLibPath,
+                                       rpath=rootLibPath, lib=rootLibs,
+                                       uselib_store='ROOT', msg='Checking ROOT TTimeStamp.h')
+                except conf.errors.ConfigurationError:
+                        print("Need to patch ROOT, see StripsUpgradeInstall TWiki")
+                        raise
+
+        conf.start_msg('Checking ROOT version')
+
+        conf.check_cxx(fragment='''#include "TROOT.h"
+                          int main() {printf("%s", gROOT->GetVersion());
+                          return 0; }''',
+                       define_ret=True, execute=True, define_name='ROOT_VERSION_EXTRACTED',
+                       add_have_to_env = 0, use = "ROOT")
+
+        root_version = conf.get_define("ROOT_VERSION_EXTRACTED")[1:-1] # Remove ""s
+        conf.end_msg(root_version)
+
+        # Here, the root version is in the dependency hash
+        conf.env["ROOT_VERSION_EXTRACTED"] = root_version
+
+        if conf.env.DEST_OS != "win32":
+                # Check version of ROOT we found?
+                rv = conf.check_cfg(
+                        path='%s/bin/root-config' % conf.env.ROOTSYS,
+                        args='--version', package='', name='ROOTX',
+                        msg='Checking version', okmsg='Done')
+                rv = rv.strip()
+                conf.env.root_version6 = rv[0] == '6'
+                col = 'YELLOW'
+                if conf.env.root_version6:
+                        col = 'BLUE'
+                conf.msg("Root version", rv, col)
+
+@conf
+def findEUDAQ(conf):
+        conf.env.enable_eudaq = False
+        if conf.options.with_eudaq == "":
+                return
+
+        try:
+                inc_path = conf.options.with_eudaq + "/producers/root/inc"
+                conf.check_cxx(header_name='ROOTProducer.h',
+                               includes = inc_path,
+                               use = "ROOT", uselib_store='EUDAQ')
+                conf.env.enable_eudaq = True
+        except:
+                # enable is already false
+                pass
+
+class wcrev_task(Task):
+        def run(self):
+                wcrev(self.inputs[0], self.outputs[0],
+                      style = self.env.wcrev_style)
+
+# Enough of tortoise's SubWCRev to do what we want
+#  Originally in SConstruct
+def wcrev(input, outName, style = None):
+        from waflib.Errors import ConfigurationError
+        if style is None or style == "svn":
+                stylestring = "svn"
+        elif style == "dummy":
+                stylestring = "made up info"
+        elif style == "git":
+                stylestring = "git"
+        else:
+                raise ConfigurationError("Unknown wcrev style, try running configure again")
+
+        print("Updating %s from %s (using %s)..." % (outName, input, stylestring))
+
+        if stylestring == "svn":
+                info = wcrev_svn()
+        elif stylestring == "git":
+                info = wcrev_git()
+        else:
+                info = wcrev_dummy()
+
+        template = open(input.abspath())
+        output = open(outName.abspath(), 'w')
+
+        for l in template.readlines():
+                outline = l.strip()
+
+                if '$WCREV$' in outline:
+                        rev = info["STSVN_REVISION"]
+                        outline = outline.replace('$WCREV$', "%d" % rev)
+
+                if '$WCMODS' in outline:
+                        start = outline.find('$WCMODS')
+                        end = outline.find('$', start+1)
+
+                        start_true = outline.find('?', start)+1
+                        end_true = outline.find(':', start)
+                        start_false = end_true+1
+
+                        true_string = outline[start_true:end_true]
+                        false_string = outline[start_false:end]
+
+                        if info["STSVN_MODIFIED"]:
+                                replace_string = true_string
+                        else:
+                                replace_string = false_string
+
+                        outline = outline[:start] + replace_string + outline[end+1:]
+
+                if '$WCURL$' in outline:
+                        reposUrl = info["STSVN_URL"]
+                        outline = outline.replace('$WCURL$', reposUrl)
+
+                if '$WCNOW$' in outline:
+                        # "2012-08-10 13:34:19 +0100 (Fri, 10 Aug 2012)"
+                        nowString = time.strftime('%Y-%m-%d %H:%M:%S +0000 (%a, %d %b %Y)')
+                        # nowString = time.ctime()
+                        outline = outline.replace('$WCNOW$', nowString)
+
+                if '$WCDATE' in outline:
+                        changeDate = info["STSVN_COMMIT_DATE"]
+                        outline = outline.replace('$WCDATE$', changeDate)
+
+                output.write(outline + "\n")
+
+        template.close()
+        output.close()
+        print(" ... done updating %s" % outName.abspath())
+
+# If svn not here, or just for testing with distcheck
+def wcrev_dummy():
+        return {
+          "STSVN_COMMIT_DATE": "Unknown",
+          "STSVN_REVISION": 0,
+          "STSVN_URL": "Unknown",
+          "STSVN_MODIFIED": True,
+        }
+
+def wcrev_git():
+        commit_date = os.popen("git log -1 --format=%cd").read().strip()
+        # NB git doesn't have number, this is the number of commits from root
+        # Hopefully that's a sane enough proxy (and the actual hash is in url)
+        rev_count = int(os.popen("git log --format=%cd | wc -l").read())
+        origin_url = os.popen("git config --get remote.origin.url").read().strip()
+        hash = os.popen("git log -1 --format=%H").read().strip()
+        url = "%s@%s" % (origin_url, hash)
+        status = subprocess.Popen("git diff-index --quiet HEAD --".split(),
+                                  stdout=subprocess.PIPE)
+        status.communicate()
+        if status.returncode == 0:
+                modified = False
+        else:
+                modified = True
+
+        return {
+          "STSVN_COMMIT_DATE": commit_date,
+          "STSVN_REVISION": rev_count,
+          "STSVN_URL": url,
+          "STSVN_MODIFIED": modified,
+        }
+
+def wcrev_svn():
+        reposInfo = []
+        svnVersion = ""
+
+        # Allow for being run in different locale
+        reposProc = subprocess.Popen(["svn", "info"],
+                                     env = {"LANG": "C"},
+                                     stdout=subprocess.PIPE)
+        reposInfoData = reposProc.communicate()[0]
+        # Python 3 requires bytes, and python2.6 onwards will accept them
+        reposInfo = reposInfoData.split(b"\n")
+        svnVersion = os.popen('svnversion').readlines()
+
+        def extractEntry(s):
+                try:
+                        k, v = s.split(":", 1)
+                        return k, v.strip()
+                except ValueError: # An empty line at the end
+                        return None, None
+        reposDict = dict([extractEntry(s) for s in reposInfo])
+
+        return {
+          "STSVN_COMMIT_DATE": reposDict["Last Changed Date"].strip(),
+          "STSVN_REVISION": int(reposDict["Revision"].strip()),
+          "STSVN_URL":  reposDict["URL"].strip(),
+          "STSVN_MODIFIED": 'M' in svnVersion,
+        }
