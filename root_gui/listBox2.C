@@ -12,7 +12,7 @@ class MyMainFrame : public TGMainFrame {
 
 private:
    TGListBox           *fListBox;
-   TGCheckButton       *fCheckMulti;
+//   TGCheckButton       *fCheckMulti;
    TList               *fSelected;   
 
 public:
@@ -54,10 +54,10 @@ MyMainFrame::MyMainFrame(const TGWindow *p, UInt_t w, UInt_t h) :
                                         kLHintsExpandX | kLHintsExpandY, 
                                         5, 5, 5, 5));
                                                          
-   fCheckMulti = new TGCheckButton(this, "&Mutliple selection", 10);
-   AddFrame(fCheckMulti, new TGLayoutHints(kLHintsTop | kLHintsLeft,
-                                           5, 5, 5, 5));
-   fCheckMulti->Connect("Clicked()", "MyMainFrame", this, "HandleButtons()"); 
+//   fCheckMulti = new TGCheckButton(this, "&Mutliple selection", 10);
+//   AddFrame(fCheckMulti, new TGLayoutHints(kLHintsTop | kLHintsLeft,
+//                                           5, 5, 5, 5));
+//   fCheckMulti->Connect("Clicked()", "MyMainFrame", this, "HandleButtons()"); 
    // Create a horizontal frame containing button(s)
    TGHorizontalFrame *hframe = new TGHorizontalFrame(this, 150, 20, kFixedWidth);
    TGTextButton *show = new TGTextButton(hframe, "&Show");
@@ -100,8 +100,8 @@ void MyMainFrame::HandleButtons()
 
    printf("HandleButton: id = %d\n", id);
 
-   if (id == 10)  
-      fListBox->SetMultipleSelections(fCheckMulti->GetState());
+//   if (id == 10)  
+//      fListBox->SetMultipleSelections(fCheckMulti->GetState());
 }
 
 
@@ -111,17 +111,16 @@ void MyMainFrame::PrintSelected()
 
    fSelected->Clear();
 
-   if (fListBox->GetMultipleSelections()) {
-      Printf("Selected entries are:\n");
-      fListBox->GetSelectedEntries(fSelected);
-      fSelected->ls();
-   } else {
+//   if (fListBox->GetMultipleSelections()) {
+//      Printf("Selected entries are:\n");
+//      fListBox->GetSelectedEntries(fSelected);
+//      fSelected->ls();
+//   } else {
       Printf("Selected entries is: %d\n", fListBox->GetSelected());
-   }
-  DoSelect();
+//   }
 }
 
-void listBox()
+void listBox2()
 {
    // Popup the GUI...
    new MyMainFrame(gClient->GetRoot(), 200, 200);
