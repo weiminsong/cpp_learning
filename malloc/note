@@ -1,0 +1,5 @@
+I still do not understand this well. 
+
+1. Basically, why it works even though I allocate 0 to the memory. 
+
+2. for compliing cpp g++ -std=c++0x test.cpp
