@@ -1,0 +1,16 @@
+Every object in C++ has access to its own address through an important pointer called this pointer. The this pointer is an implicit parameter to all member functions. Therefore, inside a member function, this may be used to refer to the invoking object.
+
+Friend functions do not have a this pointer, because friends are not members of a class. Only member functions have a this pointer.
+
+From https://www.tutorialspoint.com/cplusplus/cpp_this_pointer.htm
+
+This refers to the current object.
+
+The keyword this identifies a special type of pointer. Suppose that you create an object named x of class A, and class A has a non-static member function f(). If you call the function x.f(), the keyword this in the body of f() stores the address of x.
+
+From https://stackoverflow.com/questions/16492736/what-is-the-this-pointer
+
+
+MOre examples from: https://beginnersbook.com/2017/08/cpp-this-pointer/
+
+

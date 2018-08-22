@@ -1,21 +1,15 @@
 #!bin/sh
 
-echo "STEP 1: Compiling with Position Independent Code."
-gcc -c -Wall -Werror -fpic foo.cpp
-echo "A new file named foo.o is generated!"
+gcc -c -Wall -Werror -I$(pwd)/foo -fpic bar.cpp 
+gcc -shared  -o libbar.so bar.o
 
-echo "STEP 2: Creating a shared library from an object file."
-gcc -shared -o libfoo.so foo.o
-echo "A new file named libfoo.so is generated!"
+gcc -L$(pwd) -L$(pwd)/foo -Wall -o test main.cpp -lfoo -I$(pwd)/foo -lbar
 
-echo "STEP 3: Telling GCC where to find the shared library and Linking with a shared library."
-gcc -L$(pwd) -Wall -o test main.cpp -lfoo
-echo "A excutable file named test is generated!"
-
-echo "STEP 4: Tell the system where to find the library, and use it"
 export LD_LIBRARY_PATH=$(pwd):$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$(pwd)/foo:$LD_LIBRARY_PATH
 echo -en '\n'
 echo -en '\n'
 echo -en '\n'
 echo -en '\n'
+
 ./test

@@ -1,0 +1,5 @@
+http://www.cplusplus.com/reference/mutex/mutex/
+
+
+one thread got the chance to do something on a mutex, the others threads could not touch it any more,
+and they could touch it only if the mutex is un-locked.

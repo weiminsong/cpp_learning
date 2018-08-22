@@ -1,0 +1,6 @@
+def configure(conf):
+        print("configure!")
+
+def build(bld):
+        tg = bld(rule='cp ${SRC} ${TGT}', source='wscript', target='foo.txt')
+        bld(rule='cp ${SRC} ${TGT}', source='foo.txt', target='bar.txt')
