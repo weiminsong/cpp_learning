@@ -1,0 +1,19 @@
+How to understand the static varibale and static function?
+
+
+I need to understand the following links:
+
+https://www.learncpp.com/cpp-tutorial/812-static-member-functions/
+
+https://isocpp.org/wiki/faq/pointers-to-members
+
+https://stackoverflow.com/questions/15756331/function-pointers-generate-invalid-use-of-non-static-member-function-error
+
+http://www.cplusplus.com/doc/tutorial/pointers/
+
+https://stackoverflow.com/questions/22788026/error-lvalue-required-as-unary-operand
+
+https://www.quora.com/Why-does-a-constructor-not-return-any-value
+
+https://stackoverflow.com/questions/19661406/g-undefined-reference-to-classfunction
+
